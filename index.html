@@ -24,10 +24,24 @@
     <select id="person" aria-label="Vyberte meno"></select>
 
     <div class="controls">
-      <button id="playBtn">Pustiť (synchronizovane)</button>
-    </div>
+  <button id="playBtn">Pustiť (synchronizovane)</button>
+  <button id="downloadBtn" type="button">Stiahnuť</button>
+  <button id="clearCacheBtn" type="button">Vymazať cache</button>
+</div>
+
+
+
 
     <div id="status">Stav: pripravený</div>
+
+<!-- progress panel -->
+<div id="progressPanel" aria-hidden="false" style="margin-top:12px;">
+  <div style="display:flex;align-items:center;gap:12px;">
+    <div id="timeText" style="min-width:120px;font-family:monospace">00:00 / 00:00</div>
+    <progress id="progressBar" value="0" max="1" style="flex:1;height:12px;border-radius:6px;"></progress>
+  </div>
+</div>
+
 
     <audio id="player" preload="metadata"></audio>
 
@@ -41,7 +55,7 @@ const tracks = {
   "Adam": "audio/test.mp3",
   "Eva":  "audio/test.mp3"
 };
-const referenceTime = "01:30"; // format "HH:MM"
+const referenceTime = "02:00"; // format "HH:MM"
 const RESYNC_INTERVAL_MS = 3000; // kontrola každé 3s
 const RESYNC_TOLERANCE_S = 0.4;  // ak rozdiel väčší než 0.4s, prepíše sa
 // ---------- KONIEC KONFIGURÁCIE ----------
@@ -50,7 +64,32 @@ const selectEl = document.getElementById('person');
 const playBtn = document.getElementById('playBtn');
 const statusEl = document.getElementById('status');
 const audio = document.getElementById('player');
+const downloadBtn = document.getElementById('downloadBtn');
+const clearCacheBtn = document.getElementById('clearCacheBtn');
+const timeText = document.getElementById('timeText');
+const progressBar = document.getElementById('progressBar');
 
+
+// pomocná funkcia pre pekné formátovanie mm:ss alebo h:mm:ss pri potrebe
+function formatTime(s){
+  if(!isFinite(s) || s < 0) s = 0;
+  s = Math.floor(s);
+  const hh = Math.floor(s / 3600);
+  const mm = Math.floor((s % 3600) / 60);
+  const ss = s % 60;
+  if(hh > 0) return `${hh}:${String(mm).padStart(2,'0')}:${String(ss).padStart(2,'0')}`;
+  return `${String(mm).padStart(2,'0')}:${String(ss).padStart(2,'0')}`;
+}
+
+// aktualizuje progress UI podľa aktuálneho stavu audio
+function updateProgressUI(){
+  const dur = isFinite(audio.duration) ? audio.duration : 0;
+  const cur = isFinite(audio.currentTime) ? audio.currentTime : 0;
+  timeText.textContent = `${formatTime(cur)} / ${formatTime(dur)}`;
+  progressBar.value = dur > 0 ? (cur / dur) : 0;
+}
+
+  
 let currentBlobUrl = null;
 let resyncTimer = null;
 let syncRequested = false; // príznak, že play bol iniciovaný naším sync flow
@@ -166,21 +205,47 @@ audio.addEventListener('seeking', (e) => {
   if(Math.abs(audio.currentTime - desired) > 0.05){ audio.currentTime = desired; }
 });
 
-audio.addEventListener('timeupdate', ()=>{
-  if(audio.paused) return;
+audio.addEventListener('timeupdate', ()=> {
+  // aktualizujeme vizuálny panel
+  updateProgressUI();
+
+  // vynutíme synchronizovanú pozíciu ak treba
   const desired = computeDesiredPosition();
-  if(Math.abs(audio.currentTime - desired) > RESYNC_TOLERANCE_S){ audio.currentTime = desired; }
+  if(Math.abs(audio.currentTime - desired) > RESYNC_TOLERANCE_S){
+    audio.currentTime = desired;
+    // aktualizujeme UI po korekcii
+    updateProgressUI();
+  }
 });
 
-audio.addEventListener('play', ()=>{
+
+// každý timeupdate aktualizuje vizuálny progress aj kontroluje synchronizáciu
+audio.addEventListener('timeupdate', ()=> {
+  // 1️⃣ aktualizujeme vizuálny panel (čas a progress)
+  updateProgressUI();
+
+  // 2️⃣ ak sa prehrávanie posunulo mimo tolerancie, vrátime ho na správne miesto
+  const desired = computeDesiredPosition();
+  if(Math.abs(audio.currentTime - desired) > RESYNC_TOLERANCE_S){
+    audio.currentTime = desired;
+    // pre istotu znovu obnovíme progress UI po korekcii
+    updateProgressUI();
+  }
+});
+// Ak sa prehrávanie spustí inak než cez náš sync flow -> prerobíme to na synchronizované spustenie
+audio.addEventListener('play', () => {
   if(!syncRequested){
-    // ak sa prehrávanie spustilo inak, ihneď ho preruš a začni sync flow
-    audio.pause(); stopPlaybackCleanup(); playSynchronized();
+    // zastavíme okamžite a spustíme synchronizované prehrávanie
+    audio.pause();
+    stopPlaybackCleanup();
+    // spustíme náš sync flow (vracia audio do správnej pozície)
+    playSynchronized();
   } else {
-    // play bol autorizovaný sync flow -> po krátkej dobe resetujeme príznak
+    // autorizované spustenie - reset flag po krátkej dobe, aby ďalšie spontánne play boli znova kontrolované
     setTimeout(()=>{ syncRequested = false; }, 100);
   }
 });
+
 
 // Zakážeme kontextové menu (pravé tlačidlo) a bežné klávesy ktoré by mohli spustiť/presunúť prehrávanie
 window.addEventListener('contextmenu', e => e.preventDefault());
@@ -202,6 +267,42 @@ document.addEventListener('click', (e)=>{
 
 // UI event
 playBtn.addEventListener('click', ()=>{ stopPlaybackCleanup(); playSynchronized(); });
+// Stiahnuť a uložiť do Cache Storage (offline)
+downloadBtn.addEventListener('click', async () => {
+  const name = selectEl.value;
+  if(!name){ setStatus('vyberte meno'); return; }
+  downloadBtn.disabled = true;
+  setStatus('sťahujem...');
+  try{
+    // fetchAndCacheIfNeeded už uloží do cache ak to nie je
+    const resp = await fetchAndCacheIfNeeded(name);
+    // explicitne nastavíme audio z response (takže je pripravené aj po reload)
+    await setAudioFromResponse(resp);
+    setStatus('stiahnuté a uložené do cache (offline pripravené)');
+  }catch(err){
+    console.error(err);
+    setStatus('chyba pri sťahovaní: ' + (err.message || err));
+  } finally {
+    downloadBtn.disabled = false;
+  }
+});
+
+// Vymazať cache pre zvolenú stopu
+clearCacheBtn.addEventListener('click', async () => {
+  const name = selectEl.value;
+  if(!name){ setStatus('vyberte meno'); return; }
+  const url = tracks[name];
+  if(!('caches' in window)){ setStatus('Cache API nie je dostupné'); return; }
+  try{
+    const cache = await caches.open('synchronized-mp3-cache-v1');
+    const deleted = await cache.delete(new Request(url));
+    if(deleted) setStatus('vymazaná cache pre ' + name);
+    else setStatus('cache pre ' + name + ' nebola nájdená');
+  }catch(err){
+    console.error(err);
+    setStatus('chyba pri mazaní cache: ' + err.message);
+  }
+});
 
 // init
 (async function init(){ populateSelect(); setStatus('pripravený'); })();
