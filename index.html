@@ -3,126 +3,95 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Synchronized MP3 player (sync-only playback)</title>
+  <title>Synchronized MP3 player — STRICT sync only</title>
   <style>
     body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:24px;color:#111}
     .card{max-width:720px;padding:18px;border-radius:12px;box-shadow:0 6px 18px rgba(0,0,0,.06)}
     label,select,button{display:block;margin:8px 0}
     #status{margin-top:12px;font-size:0.95rem;color:#333}
-    .controls{margin-top:10px;display:flex;gap:8px;align-items:center}
-    button{padding:8px 12px;border-radius:8px;border:1px solid #ddd;background:#fafafa}
+    .controls{margin-top:10px}
+    button{padding:10px 14px;border-radius:8px;border:1px solid #ddd;background:#fafafa;cursor:pointer}
+    /* Skryjeme audio UI úplne */
+    audio{display:none !important}
   </style>
 </head>
 <body>
   <div class="card">
     <h2>Synchronized MP3 player — iba synchronizované prehrávanie</h2>
-    <p>Tento variant zakazuje manuálne preskakovanie a prehrávanie mimo synchronizovaného okamihu. Zvuk možno spustiť iba pomocou tlačidla <strong>Pustiť (synchronizovane)</strong>. Pokusy o manuálne preskakovanie budú automaticky upravené na správnu synchronizovanú pozíciu.</p>
+    <p>Na tejto strane je možné prehrávať zvuk <strongvýhradne</strong> synchronizovane. Je tu len jedno tlačidlo <em>Pustiť (synchronizovane)</em>. Ak sa niekto pokúsi preskočiť alebo spustiť zvuk iným spôsobom, prehrávanie sa okamžite vráti na správne synchronizované miesto.</p>
 
     <label for="person">Meno:</label>
-    <select id="person"></select>
+    <select id="person" aria-label="Vyberte meno"></select>
 
     <div class="controls">
-      <button id="playBtn">Pustiť (synchronizované)</button>
-      <button id="pauseBtn">Pauza</button>
-      <button id="downloadBtn">Stiahnuť &amp; uložiť</button>
-      <button id="clearBtn" title="Vymaže cache pre vybranú stopu">Vymazať cache</button>
+      <button id="playBtn">Pustiť (synchronizovane)</button>
     </div>
 
-    <div class="controls">
-      <div id="playerStatus">—</div>
-    </div>
+    <div id="status">Stav: pripravený</div>
 
     <audio id="player" preload="metadata"></audio>
 
-    <div id="status"></div>
-
     <hr />
-    <h4>Konfigurácia (upraviť v kóde)</h4>
-    <ul>
-      <li> Objekt <code>tracks</code> mapuje meno → URL mp3. Zmeňte na vaše adresy (napr. "audio/adam.mp3").</li>
-      <li> <code>referenceTime</code> drží referenčný začiatok v tvare "HH:MM" (napr. "01:30").</li>
-    </ul>
+    <p style="font-size:0.9rem;color:#555">Konfigurácia v kóde: objekt <code>tracks</code> (mapovanie meno → cesta k mp3) a <code>referenceTime</code> ("HH:MM").</p>
   </div>
 
 <script>
-// ---------- KONFIGURÁCIA ----------
+// ---------- KONFIGURÁCIA (upraviť v kóde) ----------
 const tracks = {
   "Adam": "audio/test.mp3",
   "Eva":  "audio/test.mp3"
 };
-const referenceTime = "01:30"; // formát "HH:MM" v 24h
-const RESYNC_INTERVAL_MS = 5000; // častejšia kontrola na udržanie sync (5s)
-const RESYNC_TOLERANCE_S = 0.5; // ak sa prehrávanie odchýli viac než táto hodnota, upravíme
+const referenceTime = "01:30"; // format "HH:MM"
+const RESYNC_INTERVAL_MS = 3000; // kontrola každé 3s
+const RESYNC_TOLERANCE_S = 0.4;  // ak rozdiel väčší než 0.4s, prepíše sa
 // ---------- KONIEC KONFIGURÁCIE ----------
 
 const selectEl = document.getElementById('person');
-const downloadBtn = document.getElementById('downloadBtn');
 const playBtn = document.getElementById('playBtn');
-const pauseBtn = document.getElementById('pauseBtn');
-const clearBtn = document.getElementById('clearBtn');
 const statusEl = document.getElementById('status');
-const playerStatusEl = document.getElementById('playerStatus');
 const audio = document.getElementById('player');
 
 let currentBlobUrl = null;
-let currentTrackUrl = null;
 let resyncTimer = null;
-let syncRequested = false; // príznak, že prehrávanie inicioval náš sync flow
+let syncRequested = false; // príznak, že play bol iniciovaný naším sync flow
+let playPendingTimeout = null;
 
-function logStatus(txt){ statusEl.textContent = txt; }
-function setPlayerStatus(txt){ playerStatusEl.textContent = txt; }
+function setStatus(txt){ statusEl.textContent = 'Stav: ' + txt; }
 
+// naplni select
 function populateSelect(){
   Object.keys(tracks).forEach(name => {
     const opt = document.createElement('option'); opt.value = name; opt.textContent = name; selectEl.appendChild(opt);
   });
 }
 
-function parseReferenceTimestampForToday(){
-  const [hh, mm] = (referenceTime || "00:00").split(':').map(Number);
-  const ref = new Date();
-  ref.setHours(hh, mm || 0, 0, 0);
-  return ref.getTime();
+function parseReference(){
+  const [hh, mm] = (referenceTime || '00:00').split(':').map(Number);
+  const ref = new Date(); ref.setHours(hh, mm || 0, 0, 0); return ref.getTime();
 }
 
-async function downloadAndCache(name){
-  if(!(name in tracks)) throw new Error('Neznáme meno');
+async function fetchAndCacheIfNeeded(name){
   const url = tracks[name];
-  logStatus('Sťahujem...');
-  try{
-    const req = new Request(url, { mode: 'cors' });
-    const resp = await fetch(req);
-    if(!resp.ok) throw new Error('Chyba pri sťahovaní: ' + resp.status);
-    if('caches' in window){
-      const cache = await caches.open('synchronized-mp3-cache-v1');
-      await cache.put(req, resp.clone());
-      logStatus('Stiahnuté a uložené do cache.');
-      await setAudioFromResponse(resp.clone());
-      currentTrackUrl = url;
-    } else {
-      const blob = await resp.blob();
-      setAudioFromBlob(blob);
-      logStatus('Prehliadač nepodporuje Cache API; súbor bude dostupný len do reloadu.');
-      currentTrackUrl = url;
-    }
-  }catch(err){ console.error(err); logStatus('Chyba: ' + err.message); }
-}
-
-async function loadFromCache(name){
-  const url = tracks[name];
-  if(!('caches' in window)) return null;
-  const cache = await caches.open('synchronized-mp3-cache-v1');
-  const matched = await cache.match(new Request(url));
-  if(!matched) return null;
-  return matched;
+  if(!url) throw new Error('Neznáme meno');
+  // skúsime cache
+  if('caches' in window){
+    const cache = await caches.open('synchronized-mp3-cache-v1');
+    const matched = await cache.match(new Request(url));
+    if(matched) return matched;
+  }
+  // ak nie v cache, stiahneme a uložíme
+  const resp = await fetch(new Request(url, {mode:'cors'}));
+  if(!resp.ok) throw new Error('Chyba pri sťahovaní: ' + resp.status);
+  if('caches' in window){
+    const cache = await caches.open('synchronized-mp3-cache-v1');
+    await cache.put(new Request(url), resp.clone());
+    return resp.clone();
+  }
+  return resp;
 }
 
 async function setAudioFromResponse(response){
   const blob = await response.blob();
-  setAudioFromBlob(blob);
-}
-
-function setAudioFromBlob(blob){
   if(currentBlobUrl){ URL.revokeObjectURL(currentBlobUrl); currentBlobUrl = null; }
   currentBlobUrl = URL.createObjectURL(blob);
   audio.src = currentBlobUrl;
@@ -130,66 +99,48 @@ function setAudioFromBlob(blob){
 
 function computeDesiredPosition(){
   if(!audio.duration || !isFinite(audio.duration)) return 0;
-  const now = Date.now();
-  const ref = parseReferenceTimestampForToday();
-  const offsetSeconds = (now - ref) / 1000;
-  if(offsetSeconds < 0) return 0; // pred ref -> začiatok
-  return ((offsetSeconds % audio.duration) + audio.duration) % audio.duration;
+  const now = Date.now(); const ref = parseReference();
+  const offset = (now - ref) / 1000;
+  if(offset < 0) return 0;
+  return ((offset % audio.duration) + audio.duration) % audio.duration;
 }
 
 async function playSynchronized(){
-  const name = selectEl.value;
-  if(!name){ logStatus('Vyberte meno.'); return; }
-  logStatus('Pripravujem synchronizované prehrávanie...');
+  const name = selectEl.value; if(!name) { setStatus('vyberte meno'); return; }
+  setStatus('pripravujem...');
 
-  // načítaj z cache ak je dostupné
   try{
-    const cached = await loadFromCache(name);
-    if(cached){ await setAudioFromResponse(cached); currentTrackUrl = tracks[name]; logStatus('Načítané z cache.'); }
-    else if(!audio.src){ await downloadAndCache(name); }
-  }catch(err){ console.warn(err); }
+    const resp = await fetchAndCacheIfNeeded(name);
+    await setAudioFromResponse(resp);
+  }catch(err){ console.error(err); setStatus('Chyba pri načítaní'); return; }
 
-  if(!audio.src){ logStatus('Súbor nie je pripravený. Stiahnite ho najskôr.'); return; }
-
-  await new Promise((resolve) => {
-    if(!isFinite(audio.duration)) {
-      audio.addEventListener('loadedmetadata', function onMeta(){
-        audio.removeEventListener('loadedmetadata', onMeta);
-        resolve();
-      });
+  // čakáme na metadata
+  await new Promise(resolve => {
+    if(!isFinite(audio.duration)){
+      audio.addEventListener('loadedmetadata', function onm(){ audio.removeEventListener('loadedmetadata', onm); resolve(); });
     } else resolve();
   });
 
-  const now = Date.now();
-  const ref = parseReferenceTimestampForToday();
-  const offsetSeconds = (now - ref) / 1000;
+  const now = Date.now(); const ref = parseReference();
+  const msToRef = ref - now;
 
-  if(offsetSeconds < 0){
-    // ak je ešte pred referenčným časom, nastavíme pozíciu na začiatok a čakáme
-    audio.currentTime = 0;
-    audio.pause();
-    setPlayerStatus('Čaká sa na referenčný čas...');
-    const msToRef = Math.max(0, Math.round((ref - now)));
-    setTimeout(async ()=>{
-      syncRequested = true; // indikujeme, že toto spustenie je synchronizované
-      try{ await audio.play(); setPlayerStatus('Prehráva (synchronizované)'); startResyncLoop(); }catch(e){ logStatus('Play blocked: ' + e.message); }
+  // ak pred referenčným časom: nastavíme currentTime=0 a počkáme
+  if(msToRef > 0){
+    audio.currentTime = 0; audio.pause(); setStatus('čeká sa na referenčný čas');
+    clearTimeout(playPendingTimeout);
+    playPendingTimeout = setTimeout(async ()=>{
+      syncRequested = true;
+      try{ await audio.play(); setStatus('hrá (synchronizované)'); startResyncLoop(); }catch(e){ setStatus('play blokovaný'); }
     }, msToRef);
     return;
   }
 
-  // ak sme po ref čase, nastav aktuálnu pozíciu podľa výpočtu
+  // ak po referenčnom čase
   const desired = computeDesiredPosition();
   audio.currentTime = desired;
   syncRequested = true;
-  try{ await audio.play(); setPlayerStatus('Prehráva (synchronizované)'); startResyncLoop(); logStatus('Prehrávam (synchronizované).'); }
-  catch(e){ logStatus('Prehrať sa nepodarilo: ' + e.message); }
-}
-
-function pausePlayback(){
-  syncRequested = false; // ďalšie ručné play nebude považované za synchronizované
-  audio.pause();
-  setPlayerStatus('Pozastavené');
-  if(resyncTimer) clearInterval(resyncTimer);
+  try{ await audio.play(); setStatus('hrá (synchronizované)'); startResyncLoop(); }
+  catch(e){ setStatus('play blokovaný'); }
 }
 
 function startResyncLoop(){
@@ -197,75 +148,63 @@ function startResyncLoop(){
   resyncTimer = setInterval(()=>{
     if(audio.paused) return;
     const desired = computeDesiredPosition();
-    const diff = Math.abs(audio.currentTime - desired);
-    if(diff > RESYNC_TOLERANCE_S){
+    if(Math.abs(audio.currentTime - desired) > RESYNC_TOLERANCE_S){
       audio.currentTime = desired;
     }
   }, RESYNC_INTERVAL_MS);
 }
 
-// Zakážeme manuálne preskakovanie: pri evente 'seeking' okamžite prepiseme na požadovanú pozíciu
-audio.addEventListener('seeking', (e)=>{
+function stopPlaybackCleanup(){
+  syncRequested = false;
+  if(resyncTimer) { clearInterval(resyncTimer); resyncTimer = null; }
+  if(playPendingTimeout) { clearTimeout(playPendingTimeout); playPendingTimeout = null; }
+}
+
+// STRIKTNE: zabráňte akejkoľvek forme manuálneho preskakovania alebo spustenia
+audio.addEventListener('seeking', (e) => {
   const desired = computeDesiredPosition();
-  if(Math.abs(audio.currentTime - desired) > 0.1){
-    // ak používateľ alebo UI sa pokúsil preskočiť, vrátime ho na správnu pozíciu
-    audio.currentTime = desired;
-  }
+  if(Math.abs(audio.currentTime - desired) > 0.05){ audio.currentTime = desired; }
 });
 
-// Ak niekto pokúsi priamo spustiť audio (napr. prostredníctvom skriptu alebo náhodou), presmerujeme na synchronizovaný flow
-audio.addEventListener('play', (e)=>{
-  // Ak prehrávanie nebolo iniciované naším sync flow, prerobíme ho
-  if(!syncRequested){
-    // zastavíme a pošleme používateľa cez playSynchronized
-    audio.pause();
-    playSynchronized();
-  } else {
-    // ak bolo iniciované správne, resetujeme príznak — ďalšie spontánne play bude znovu kontrolované
-    syncRequested = false;
-  }
-});
-
-// Priebežná kontrola: keď sa prehráva, kontrolujeme malý drift pri timeupdate
 audio.addEventListener('timeupdate', ()=>{
   if(audio.paused) return;
   const desired = computeDesiredPosition();
-  if(Math.abs(audio.currentTime - desired) > RESYNC_TOLERANCE_S){
-    audio.currentTime = desired;
+  if(Math.abs(audio.currentTime - desired) > RESYNC_TOLERANCE_S){ audio.currentTime = desired; }
+});
+
+audio.addEventListener('play', ()=>{
+  if(!syncRequested){
+    // ak sa prehrávanie spustilo inak, ihneď ho preruš a začni sync flow
+    audio.pause(); stopPlaybackCleanup(); playSynchronized();
+  } else {
+    // play bol autorizovaný sync flow -> po krátkej dobe resetujeme príznak
+    setTimeout(()=>{ syncRequested = false; }, 100);
   }
 });
 
-// UI eventy
-downloadBtn.addEventListener('click', ()=>{
-  const name = selectEl.value; if(!name){ logStatus('Vyberte meno.'); return; }
-  downloadAndCache(name);
-});
-playBtn.addEventListener('click', ()=>{ playSynchronized(); });
-pauseBtn.addEventListener('click', ()=>{ pausePlayback(); });
-clearBtn.addEventListener('click', async ()=>{
-  const name = selectEl.value; if(!(name in tracks)){ logStatus('Vyberte meno.'); return; }
-  const url = tracks[name];
-  if(!('caches' in window)){ logStatus('Cache API nie je dostupné v tomto prehliadači.'); return; }
-  const cache = await caches.open('synchronized-mp3-cache-v1');
-  await cache.delete(new Request(url));
-  logStatus('Vymazané z cache: ' + name);
+// Zakážeme kontextové menu (pravé tlačidlo) a bežné klávesy ktoré by mohli spustiť/presunúť prehrávanie
+window.addEventListener('contextmenu', e => e.preventDefault());
+window.addEventListener('keydown', e => {
+  // space (32), left(37), up(38), right(39), down(40), k(75) atď. — zablokujeme ich ak nie je focus v input
+  const blocked = [32,37,38,39,40,75];
+  const target = e.target;
+  const isInput = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable);
+  if(blocked.includes(e.keyCode) && !isInput){ e.preventDefault(); e.stopPropagation(); }
+}, true);
+
+// Ak používateľ klikne kdekoľvek, ak to vedie k neautorizovanému prehratiu, vrátime to späť (dodatočná bezpečnosť)
+document.addEventListener('click', (e)=>{
+  // žiadne akcie — len čisté monitorovanie
+  if(audio.paused) return;
+  const desired = computeDesiredPosition();
+  if(Math.abs(audio.currentTime - desired) > 0.05) audio.currentTime = desired;
 });
 
-// prevent context menu on audio (minor hardening)
-audio.addEventListener('contextmenu', (e)=> e.preventDefault());
+// UI event
+playBtn.addEventListener('click', ()=>{ stopPlaybackCleanup(); playSynchronized(); });
 
 // init
-(async function init(){
-  populateSelect();
-  if(selectEl.options.length > 0){
-    const first = selectEl.options[0].value;
-    try{
-      const cached = await loadFromCache(first);
-      if(cached){ logStatus('Nájdená cache pre "' + first + '". Môžete stlačiť Pustiť.'); }
-      else { logStatus('Žiadne uložené stopy v cache. Stiahnite súbor pomocou tlačítka Stiahnuť.'); }
-    }catch(err){ console.warn(err); }
-  }
-})();
+(async function init(){ populateSelect(); setStatus('pripravený'); })();
 
 </script>
 </body>
