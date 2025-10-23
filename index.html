@@ -51,7 +51,10 @@
 };
 
 // Referenčná hodina v lokálnom čase (24h). Napr. 10 znamená 10:00:00 dňa.
-const referenceHour = 1.5;
+// const referenceHour = 10;
+const referenceTime = "01:30"; // formát "HH:MM" v 24h, napr. "13:30" pre 1:30 PM
+
+
 // Ako často sa skontroluje synchronizácia a prípadne upraví (ms)
 const RESYNC_INTERVAL_MS = 30_000; // 30s
 // Tolerancia (sekundy). Ak rozdiel medzi očakávaným a skutočným časom prehrávania presiahne tento práh, upraví sa.
@@ -81,10 +84,13 @@ function populateSelect(){
 
 // Pomocná funkcia pre referenčný čas (dnešný deň o referenceHour:00:00)
 function getReferenceTimestampForToday(){
+  const [hh, mm] = (referenceTime || "00:00").split(':').map(Number);
   const ref = new Date();
-  ref.setHours(referenceHour,0,0,0);
+  ref.setHours(hh, mm, 0, 0);
   return ref.getTime();
 }
+
+
 
 // Stiahne a uloží track do Cache Storage pod requestom (URL ako key)
 async function downloadAndCache(name){
