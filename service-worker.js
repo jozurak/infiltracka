@@ -1,14 +1,15 @@
-// service-worker.js
+// service-worker.js  (umiestnite do rovnakého folderu ako index.html)
 const CACHE_NAME = 'sync-mp3-cache-v2';
+
+// RELATÍVNE cesty (dôležité pre GitHub Pages / repo subpath)
 const PRECACHE_URLS = [
-  '/',                 // ak je index.html v root
-  '/index.html',       // ak váš súbor je nazvaný index.html
-  '/audio/test.mp3',   // pridať sem všetky mp3, ktoré chcete precacheovať
-  // '/audio/adam.mp3', '/audio/eva.mp3'  <-- pridajte ďalšie položky podľa tracks
+  './',                 // koreň v scope (index)
+  './index.html',
+  './audio/test.mp3'    // pridajte sem všetky mp3, ktoré chcete mať dostupné offline
 ];
 
-// Install: prednačítanie požadovaných súborov
-self.addEventListener('install', (event) => {
+// Install -> prednačítanie
+self.addEventListener('install', event => {
   event.waitUntil(
     caches.open(CACHE_NAME)
       .then(cache => cache.addAll(PRECACHE_URLS))
@@ -16,36 +17,47 @@ self.addEventListener('install', (event) => {
   );
 });
 
-// Activate: vyčisti staré cache
-self.addEventListener('activate', (event) => {
+// Activate -> vyčistenie starých cache a prevzatie kontroly
+self.addEventListener('activate', event => {
   event.waitUntil(
-    caches.keys().then(keys =>
-      Promise.all(keys.map(k => {
-        if (k !== CACHE_NAME) return caches.delete(k);
-      }))
-    ).then(() => self.clients.claim())
+    caches.keys().then(keys => Promise.all(
+      keys.map(k => (k !== CACHE_NAME) ? caches.delete(k) : Promise.resolve())
+    ))
+    .then(() => self.clients.claim())
   );
 });
 
-// Fetch: preferuj cache, potom sieť (cache-first)
-self.addEventListener('fetch', (event) => {
+// Fetch -> preferuj cache, pre navigácie vráť index.html (SPA-fallback)
+self.addEventListener('fetch', event => {
   const req = event.request;
-  // iba GET requesty: nechceme zasahovať do POST atď.
+
+  // iba GET požiadavky
   if (req.method !== 'GET') return;
 
+  // Ak ide o navigačnú požiadavku (reload / vstup do stránky), vrátiť index.html z cache ak existuje
+  if (req.mode === 'navigate') {
+    event.respondWith(
+      caches.match('./index.html').then(cached => {
+        if (cached) return cached;
+        return fetch(req).catch(() => caches.match('./')); // fallback na './'
+      })
+    );
+    return;
+  }
+
+  // Pre iné požiadavky: cache-first so zapísaním do runtime cache ak nie je
   event.respondWith(
-    caches.match(req).then(cached => {
-      if (cached) return cached;
-      // ak nie je v cache, skúsi sieť a uloží do cache (runtime cache)
-      return fetch(req).then(resp => {
-        // ak nie je platná odpoveď, necháme ju prejsť
-        if (!resp || resp.status !== 200 || resp.type === 'opaque') return resp;
-        const respClone = resp.clone();
-        caches.open(CACHE_NAME).then(cache => cache.put(req, respClone));
-        return resp;
+    caches.match(req).then(cachedResp => {
+      if (cachedResp) return cachedResp;
+      return fetch(req).then(networkResp => {
+        // ak platná odpoveď, ulož do cache
+        if (!networkResp || networkResp.status !== 200) return networkResp;
+        const cloned = networkResp.clone();
+        caches.open(CACHE_NAME).then(cache => cache.put(req, cloned));
+        return networkResp;
       }).catch(() => {
-        // fallback: ak chcete, môžete vrátiť offline placeholder (tu nič)
-        return caches.match('/index.html'); // aspoň načíta stránku offline
+        // pri sietovej chybe: ak je to audio, možno vrátiť cached fallback, alebo index
+        return caches.match('./index.html');
       });
     })
   );
