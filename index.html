@@ -78,6 +78,26 @@ const downloadBtn = document.getElementById('downloadBtn');
 const clearCacheBtn = document.getElementById('clearCacheBtn');
 const timeText = document.getElementById('timeText');
 const progressBar = document.getElementById('progressBar');
+audio.setAttribute('playsinline', ''); // iOS inline behavior
+audio.preload = 'auto';                // prednačítanie meta + data
+// Media Session: zobrazenie ovládacích prvkov v notifikáciách / lock-screene
+if ('mediaSession' in navigator) {
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title: 'Synchronized Audio',
+    artist: selectEl.value || '',
+    album: '',
+    artwork: [
+      // voliteľné: { src: '/icons/icon-96.png', sizes: '96x96', type: 'image/png' }
+    ]
+  });
+
+  navigator.mediaSession.setActionHandler('play', () => { stopPlaybackCleanup(); playSynchronized(); });
+  navigator.mediaSession.setActionHandler('pause', () => { stopPlaybackCleanup(); audio.pause(); });
+  // ostatné handlery (seekbackward/seekforward) ignorujeme alebo zablokujeme
+  navigator.mediaSession.setActionHandler('seekbackward', null);
+  navigator.mediaSession.setActionHandler('seekforward', null);
+  navigator.mediaSession.setActionHandler('seekto', null);
+}
 
 
 // pomocná funkcia pre pekné formátovanie mm:ss alebo h:mm:ss pri potrebe
