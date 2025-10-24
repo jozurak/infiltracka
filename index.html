@@ -140,25 +140,113 @@ function parseReference(){
   const ref = new Date(); ref.setHours(hh, mm || 0, 0, 0); return ref.getTime();
 }
 
+// ---------- CACHE MANAGEMENT: on-demand caching + LRU eviction ----------
+
+const CACHE_NAME = 'synchronized-mp3-cache-v2';
+// Maximálny objem uložených audio súborov v bajtoch (prispôsobte podľa potreby)
+const MAX_CACHE_BYTES = 700 * 1024 * 1024; // 700 MB
+// Maximálna veľkosť jedného súboru (voliteľné)
+const MAX_SINGLE_FILE_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB (príklad)
+
+// Pomocná: uloží meta záznam do cache ako JSON pod kľúč '__meta__' + url
+async function putMeta(cache, url, size) {
+  const meta = { url, size, ts: Date.now() };
+  const metaReq = new Request('__meta__' + url);
+  const metaResp = new Response(JSON.stringify(meta), { headers: { 'Content-Type': 'application/json' }});
+  await cache.put(metaReq, metaResp);
+}
+
+// Pomocná: načíta všetky meta záznamy z cache a vráti pole {url,size,ts}
+async function listCacheMetas(cache) {
+  const keys = await cache.keys();
+  const metas = [];
+  for (const req of keys) {
+    const key = req.url || req; // v niektorých prostrediach req je Request
+    // we stored meta under Request('__meta__' + url) — match by URL path ending
+    if (req.url && req.url.includes('__meta__')) {
+      try {
+        const resp = await cache.match(req);
+        if (!resp) continue;
+        const j = await resp.json();
+        if (j && j.url) metas.push(j);
+      } catch (e) { /* ignore malformed */ }
+    }
+  }
+  return metas;
+}
+
+// Vypočíta aktuálne miesto obsadené cache (sčítaním meta.size)
+async function computeCacheUsage(cache) {
+  const metas = await listCacheMetas(cache);
+  let total = 0;
+  for (const m of metas) total += (m.size || 0);
+  return { total, metas };
+}
+
+// Urob LRU eviction: zmaž najstaršie meta + audio kým total <= limit
+async function enforceCacheLimit(maxBytes) {
+  const cache = await caches.open(CACHE_NAME);
+  const { total, metas } = await computeCacheUsage(cache);
+  if (total <= maxBytes) return { total, removed: 0 };
+
+  // zoradíme podľa ts asc (najstaršie prvé)
+  metas.sort((a,b)=> (a.ts||0) - (b.ts||0));
+  let curTotal = total;
+  let removed = 0;
+  for (const m of metas) {
+    if (curTotal <= maxBytes) break;
+    try {
+      await cache.delete(new Request(m.url));
+      await cache.delete(new Request('__meta__' + m.url));
+      curTotal -= (m.size || 0);
+      removed++;
+    } catch(e) {
+      console.warn('Eviction failed for', m.url, e);
+    }
+  }
+  return { total: curTotal, removed };
+}
+
+// Hlavná funkcia: stiahni a ulož do cache len na požiadanie, spolu s meta, a potom vynúť limit
 async function fetchAndCacheIfNeeded(name){
   const url = tracks[name];
   if(!url) throw new Error('Neznáme meno');
-  // skúsime cache
+  // najprv skontroluj, či je už uložené (meta existuje)
   if('caches' in window){
-    const cache = await caches.open('synchronized-mp3-cache-v1');
+    const cache = await caches.open(CACHE_NAME);
     const matched = await cache.match(new Request(url));
     if(matched) return matched;
   }
-  // ak nie v cache, stiahneme a uložíme
-  const resp = await fetch(new Request(url, {mode:'cors'}));
+
+  // ak nie, stiahneme súbor (stream) a urobíme cache.put + meta + enfore limit
+  const resp = await fetch(new Request(url, { mode: 'cors' }));
   if(!resp.ok) throw new Error('Chyba pri sťahovaní: ' + resp.status);
-  if('caches' in window){
-    const cache = await caches.open('synchronized-mp3-cache-v1');
-    await cache.put(new Request(url), resp.clone());
-    return resp.clone();
+  // Ak je to veľký súbor, zistíme veľkosť a prípadne odmietneme
+  // Pozn: nie všetky odpovede obsahujú content-length; preto použijeme blob.size po clone
+  const respClone = resp.clone();
+  const blob = await respClone.blob();
+  const size = blob.size || 0;
+  if (size > MAX_SINGLE_FILE_BYTES) {
+    throw new Error('Súbor je príliš veľký pre lokálne uloženie (' + (size/1024/1024).toFixed(1) + ' MB)');
   }
-  return resp;
+
+  // vložíme do cache: najprv response (potrebujeme origin/cors povolenie)
+  if('caches' in window){
+    const cache = await caches.open(CACHE_NAME);
+    await cache.put(new Request(url), new Response(blob, { headers: resp.headers }));
+    // ulož meta (size + ts)
+    await putMeta(cache, url, size);
+    // enforce LRU limit asynchrone (ale čakáme tu na dokončenie, aby užívateľ vedel stav)
+    const eviction = await enforceCacheLimit(MAX_CACHE_BYTES);
+    console.log('Cache stored', url, 'size', size, 'eviction:', eviction);
+    // vráť originálnu Response (re-create z blob), aby volajúci mohol použiť
+    return new Response(blob, { headers: resp.headers });
+  }
+
+  // fallback ak cache nie je dostupné: vráť response (blob) priamo
+  return new Response(blob, { headers: resp.headers });
 }
+
 
 async function setAudioFromResponse(response){
   const blob = await response.blob();
